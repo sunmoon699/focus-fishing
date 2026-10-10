@@ -1,6 +1,6 @@
 /* ============================================================
    专注钓鱼 —— Cloudflare Pages Functions 后端（账号 + 云存档）
-   最新修改时间：2026-10-10 22:47
+   最新修改时间：2026-10-10 23:56
    ------------------------------------------------------------
    这是一个 catch-all 路由（functions/api/[[path]].js），
    一个文件收拢全部接口，避免额外的辅助文件被误当成路由暴露。
@@ -440,6 +440,161 @@ async function handleAccountDelete(env, uid){
   return ok({});
 }
 
+/* ---------- 房间联机（实时多人同钓） ---------- */
+
+/* 生成 6 位邀请码（字母数字，去掉易混的 0/O/1/I/L），大小写不敏感匹配。
+   若撞码则重试（rooms.code 有 UNIQUE，极端情况下再随机即可）。 */
+function genRoomCode(){
+  const CH = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  const a = crypto.getRandomValues(new Uint32Array(6));
+  for(let i = 0; i < 6; i++) s += CH[a[i] % CH.length];
+  return s;
+}
+
+/* 清理：等待态超过 30 分钟未开始的房间自动销毁（Q25 默认）；
+   进行态/已结束态超过 24 小时仍无人退出的也清掉，避免孤儿数据。 */
+async function cleanupRooms(env){
+  const now = Date.now();
+  try{
+    await env.DB.prepare(
+      'DELETE FROM rooms WHERE (status = ? AND created_at < ?) OR (focus_end_at IS NOT NULL AND focus_end_at < ?)'
+    ).bind('waiting', now - 30 * 60000, now - 24 * 3600 * 1000).run();
+  }catch(e){}
+}
+
+/* 拼装房间状态：成员列表含昵称 / 头像 / 今日统计，并标记请求者在房间的角色。 */
+async function buildRoomState(env, room, uid){
+  const rows = await env.DB.prepare(
+    'SELECT p.user_id AS uid, p.role AS role, u.username AS username ' +
+    'FROM room_players p JOIN users u ON u.id = p.user_id WHERE p.room_id = ?'
+  ).bind(room.id).all();
+  const date = todayStrLocal();
+  const members = [];
+  for(const r of (rows && rows.results) || []){
+    const prof = await getProfile(env, r.uid);
+    const st = await env.DB.prepare('SELECT focus_min, fish, coins FROM daily_stats WHERE user_id=? AND date=?').bind(r.uid, date).first();
+    members.push({
+      uid: r.uid, username: r.username, name: prof.name, avatar: prof.avatar, role: r.role,
+      today: { focusMin: st ? st.focus_min : 0, fish: st ? st.fish : 0, coins: st ? st.coins : 0 }
+    });
+  }
+  /* 进行态且已到结束时间 → 标记为 ended（仍保留房间，成员可退 / 房主可再来一轮） */
+  let status = room.status;
+  if(status === 'active' && room.focus_end_at && nowTs() >= room.focus_end_at) status = 'ended';
+  return {
+    code: room.code, status: status, role: (room.host_id === uid ? 'host' : 'member'),
+    durationMin: room.duration_min, focusEndAt: room.focus_end_at || null,
+    hostName: members.find(m => m.uid === room.host_id) ? members.find(m => m.uid === room.host_id).username : null,
+    members: members
+  };
+}
+function nowTs(){ return Date.now(); }
+
+/* 一个人同时只能在一个房间里：创建 / 加入前先把本人从其它房间移除。
+   否则会出现「同时被两个房间拉起专注」，本地 S.session 只会保留一个，
+   另一个房间的倒计时仍在跑，结算就会错乱。 */
+async function detachFromOtherRooms(env, uid, keepRoomId){
+  const rows = await env.DB.prepare('SELECT room_id FROM room_players WHERE user_id = ?').bind(uid).all();
+  for(const r of (rows && rows.results) || []){
+    if(keepRoomId && r.room_id === keepRoomId) continue;
+    await env.DB.prepare('DELETE FROM room_players WHERE room_id=? AND user_id=?').bind(r.room_id, uid).run();
+    /* 若该房间因此空了（非房主主动退出的情况），把房间一并回收，避免孤儿房 */
+    const left = await env.DB.prepare('SELECT COUNT(*) AS c FROM room_players WHERE room_id = ?').bind(r.room_id).first();
+    if(left && left.c === 0) await env.DB.prepare('DELETE FROM rooms WHERE id = ?').bind(r.room_id).run();
+  }
+}
+
+async function handleRoomCreate(req, env, uid){
+  const b = await readJson(req);
+  let dm = Math.max(5, Math.min(180, parseInt(b.durationMin, 10) || 25));
+  const now = Date.now();
+  await detachFromOtherRooms(env, uid, null);
+  let code = genRoomCode(), tries = 0, id = null;
+  while(tries++ < 8){
+    try{
+      const r = await env.DB.prepare(
+        'INSERT INTO rooms(code, host_id, status, duration_min, created_at, expires_at) VALUES(?,?,?,?,?,?) ' +
+        'ON CONFLICT(code) DO NOTHING'
+      ).bind(code, uid, 'waiting', dm, now, now + 30 * 60000).run();
+      /* 用 lastRowId 判断是否插入成功（DO NOTHING 时 lastRowId 为 0） */
+      if(r && r.meta && r.meta.last_row_id){ id = r.meta.last_row_id; break; }
+      const hit = await env.DB.prepare('SELECT id FROM rooms WHERE code = ?').bind(code).first();
+      if(hit && hit.id){ id = hit.id; break; }
+      code = genRoomCode();
+    }catch(e){ code = genRoomCode(); }
+  }
+  if(!id) return bad('创建房间失败，请稍后重试', 500);
+  await env.DB.prepare('INSERT OR IGNORE INTO room_players(room_id, user_id, role, joined_at) VALUES(?,?,?,?)')
+    .bind(id, uid, 'owner', now).run();
+  const room = { id, code, host_id: uid, status: 'waiting', duration_min: dm, focus_end_at: null };
+  return ok(await buildRoomState(env, room, uid));
+}
+
+async function handleRoomJoin(req, env, uid){
+  const b = await readJson(req);
+  const code = (b.code || '').trim().toUpperCase();
+  if(!/^[A-Z0-9]{4,8}$/.test(code)) return bad('邀请码格式有误');
+  const room = await env.DB.prepare('SELECT * FROM rooms WHERE UPPER(code) = ?').bind(code).first();
+  if(!room) return bad('邀请码无效或房间已解散');
+  if(room.status !== 'waiting') return bad('房间已开始专注，无法中途加入');
+  const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM room_players WHERE room_id = ?').bind(room.id).first();
+  if(cnt && cnt.c >= 4) return bad('房间已满（最多 4 人）', 429);
+  const exist = await env.DB.prepare('SELECT 1 FROM room_players WHERE room_id=? AND user_id=?').bind(room.id, uid).first();
+  if(!exist){
+    await detachFromOtherRooms(env, uid, room.id);
+    /* 剔除已过期的等待房后复查人数，避免并发下超额 */
+    const cnt2 = await env.DB.prepare('SELECT COUNT(*) AS c FROM room_players WHERE room_id = ?').bind(room.id).first();
+    if(cnt2 && cnt2.c >= 4) return bad('房间已满（最多 4 人）', 429);
+    await env.DB.prepare('INSERT OR IGNORE INTO room_players(room_id, user_id, role, joined_at) VALUES(?,?,?,?)')
+      .bind(room.id, uid, 'member', Date.now()).run();
+  }
+  return ok(await buildRoomState(env, room, uid));
+}
+
+async function handleRoomState(req, env, uid){
+  await cleanupRooms(env);
+  const code = (new URL(req.url).searchParams.get('code') || '').trim().toUpperCase();
+  if(!code) return bad('缺少邀请码');
+  const room = await env.DB.prepare('SELECT * FROM rooms WHERE UPPER(code) = ?').bind(code).first();
+  if(!room) return bad('房间不存在或已解散', 404);
+  const inRoom = await env.DB.prepare('SELECT 1 FROM room_players WHERE room_id=? AND user_id=?').bind(room.id, uid).first();
+  if(!inRoom) return bad('你已不在该房间', 410);
+  return ok(await buildRoomState(env, room, uid));
+}
+
+async function handleRoomStart(req, env, uid){
+  const b = await readJson(req);
+  const code = (b.code || '').trim().toUpperCase();
+  const room = await env.DB.prepare('SELECT * FROM rooms WHERE UPPER(code) = ?').bind(code).first();
+  if(!room) return bad('房间不存在或已解散', 404);
+  if(room.host_id !== uid) return bad('只有房主能开始专注', 403);
+  const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM room_players WHERE room_id = ?').bind(room.id).first();
+  if(!cnt || cnt.c < 2) return bad('至少需要 2 人才能开始专注');
+  let dm = Math.max(5, Math.min(180, parseInt(b.durationMin, 10) || room.duration_min || 25));
+  const endAt = Date.now() + dm * 60000;
+  await env.DB.prepare('UPDATE rooms SET status=?, focus_end_at=?, duration_min=? WHERE id=?')
+    .bind('active', endAt, dm, room.id).run();
+  room.status = 'active'; room.focus_end_at = endAt; room.duration_min = dm;
+  return ok(await buildRoomState(env, room, uid));
+}
+
+async function handleRoomLeave(req, env, uid){
+  const b = await readJson(req);
+  const code = (b.code || '').trim().toUpperCase();
+  const room = await env.DB.prepare('SELECT * FROM rooms WHERE UPPER(code) = ?').bind(code).first();
+  if(!room) return ok({ gone: true, destroyed: false });   /* 房间已不在，直接算退出 */
+  if(room.host_id === uid){
+    /* 房主退出 → 销毁房间（先清成员再删房），邀请码失效，其他成员下次轮询收到 404（Q7/Q28） */
+    await env.DB.prepare('DELETE FROM room_players WHERE room_id = ?').bind(room.id).run();
+    await env.DB.prepare('DELETE FROM rooms WHERE id = ?').bind(room.id).run();
+    return ok({ gone: true, destroyed: true });
+  }
+  /* 普通成员退出：仅自己离开，房间与房主不受影响（Q24） */
+  await env.DB.prepare('DELETE FROM room_players WHERE room_id=? AND user_id=?').bind(room.id, uid).run();
+  return ok({ gone: true, destroyed: false });
+}
+
 /* ---------- 路由入口 ---------- */
 
 export async function onRequest(context){
@@ -507,6 +662,20 @@ export async function onRequest(context){
       if(path === 'notification/read'){    if(request.method!=='POST') return bad('方法不支持',405); return await handleNotifRead(request, env, u.uid); }
       if(path === 'stats/report'){         if(request.method!=='POST') return bad('方法不支持',405); return await handleStatsReport(request, env, u.uid); }
       if(path === 'account/delete'){       if(request.method!=='POST') return bad('方法不支持',405); return await handleAccountDelete(env, u.uid); }
+      return bad('未知接口', 404);
+    }
+
+    /* 房间联机（需登录） */
+    if(path === 'room/create'  || path === 'room/join'    || path === 'room/state' ||
+       path === 'room/start'   || path === 'room/leave'){
+      const u = await resolveUser(env, request);
+      if(!u) return bad('登录已失效，请重新登录', 401);
+      await ensureSocialSchema(env);   /* 顺带保证 rooms / room_players 等表存在 */
+      if(path === 'room/create'){      if(request.method!=='POST') return bad('方法不支持',405); return await handleRoomCreate(request, env, u.uid); }
+      if(path === 'room/join'){        if(request.method!=='POST') return bad('方法不支持',405); return await handleRoomJoin(request, env, u.uid); }
+      if(path === 'room/state'){       if(request.method!=='GET')  return bad('方法不支持',405); return await handleRoomState(request, env, u.uid); }
+      if(path === 'room/start'){       if(request.method!=='POST') return bad('方法不支持',405); return await handleRoomStart(request, env, u.uid); }
+      if(path === 'room/leave'){       if(request.method!=='POST') return bad('方法不支持',405); return await handleRoomLeave(request, env, u.uid); }
       return bad('未知接口', 404);
     }
 

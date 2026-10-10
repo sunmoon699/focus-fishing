@@ -1,4 +1,4 @@
-<!-- 最新修改时间：2026-10-10 22:56 -->
+<!-- 最新修改时间：2026-10-10 23:56 -->
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
 <head>
@@ -176,7 +176,30 @@ svg{shape-rendering:crispEdges}
 .fr-av.sm{width:30px;height:30px;border-radius:6px}
 .fr-nm{flex:1 1 auto;min-width:0;font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fr-today{flex:none;font-size:12px;color:var(--muted)}
-.fr-star{color:var(--gold);font-size:13px}
+.fr-star{color:var(--gold);font-size:28px;margin-left:6px;line-height:1;vertical-align:-2px}
+
+/* 联机房间 */
+.room-code-row{display:flex;align-items:center;gap:10px;margin:4px 0 8px}
+.room-code-row>span{font-size:12px;color:var(--muted);font-weight:700}
+.room-code{flex:1 1 auto;font-size:27px;font-weight:800;letter-spacing:5px;color:var(--accent);
+  text-shadow:2px 2px 0 rgba(51,42,78,.12)}
+.room-members{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:9px;margin-top:8px}
+.room-mem{display:flex;align-items:center;gap:9px;padding:9px 10px;background:var(--surface);
+  border:var(--bw) solid var(--ink);border-radius:var(--radius);box-shadow:var(--sh-s)}
+.rm-nm{flex:1 1 auto;min-width:0;font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rm-host{font-size:10.5px;font-weight:700;color:var(--accent);border:1.5px solid var(--accent);
+  border-radius:5px;padding:0 4px;vertical-align:1px}
+.rm-today{flex:none;font-size:11px;color:var(--muted)}
+.room-timer{font-size:40px;font-weight:800;text-align:center;letter-spacing:2px;margin:14px 0 6px;
+  color:var(--text);font-variant-numeric:tabular-nums}
+.room-live{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding:9px 11px;
+  background:var(--surface2);border:var(--bw) solid var(--ink);border-radius:10px}
+.room-live-t{font-size:11.5px;color:var(--muted);flex:none}
+.room-live-avs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.room-live-av{width:30px;height:30px;border:var(--bw) solid var(--ink);border-radius:7px;overflow:hidden;
+  background:var(--surface)}
+.room-live-av svg{width:100%;height:100%;display:block}
+.room-live-nm{font-size:11px;color:var(--text2);font-weight:700;margin-right:2px}
 
 /* 弹窗内通用 */
 .fr-sec-t{font-size:12px;font-weight:700;color:var(--text2);letter-spacing:.1em;margin:14px 0 7px}
@@ -455,7 +478,7 @@ html[data-theme="dark"] .price{color:var(--ink)}
 
 /* 账号管理下拉（设置页：账号卡片内） */
 .acct-menu-wrap{position:relative;flex:none}
-.acct-menu-wrap .caret{font-size:10px;opacity:.7}
+.acct-menu-wrap .caret{font-size:26px;opacity:.9;margin-left:5px;vertical-align:-2px}
 .acct-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;
   background:var(--surface);border:var(--bw) solid var(--ink);border-radius:10px;
   box-shadow:4px 4px 0 rgba(51,42,78,.18);min-width:128px;overflow:hidden}
@@ -2153,6 +2176,10 @@ function remainingMs(){
 }
 
 function tick(){
+  if(room && room.status === 'active' && room.focusEndAt){
+    const el = document.getElementById('roomTimer');
+    if(el) el.textContent = fmtRoomClock(roomElapsedSec(room.focusEndAt));
+  }
   if(!S.session || S.session.paused) return;
   if(Date.now() >= S.session.endAt){ finish(); return; }
   paintClock();
@@ -2336,7 +2363,12 @@ function openModal(html, onAct){
     if(!b.dataset.act) return;
     const a = b.dataset.act;
     if(a === 'close') closeModal();
-    else if(a === 'again'){ closeModal(); startSession(); }
+    else if(a === 'again'){
+      closeModal();
+      /* 联机房里不直接开单人专注：回到房间页，由房主决定是否再来一轮（Q19） */
+      if(room){ page = 'home'; render(); return; }
+      startSession();
+    }
     else if(a === 'break'){ closeModal(); startBreak(5); }
   });
   $('modalRoot').appendChild(d);
@@ -2559,7 +2591,8 @@ function renderHome(){
     '</div>';
   h += '</div>';   /* 关闭装备区（.sub-sep） */
   /* 开始专注放在卡片底部 */
-  h += '<button class="eq-change" style="margin-top:10px" data-act="start">开始专注</button></div>';
+  h += '<button class="eq-change" style="margin-top:10px" data-act="start">开始专注</button>'+
+       '<button class="eq-change ghost" style="margin-top:8px" data-act="roomOpen">联机专注 · 和钓友一起</button></div>';
 
   /* 概率面板 */
   h += '<h2 class="sec tbox">本次上钩概率 · '+esc(loc.name)+'</h2>';
@@ -2600,6 +2633,17 @@ function renderRunning(s){
   h += '<div class="ring">'+ring()+fishScene()+'</div>';
   h += '<div class="clock"><span id="clockVal">--:--</span><small>'+esc(loc.name)+' · '+(s.task||'专注中')+'</small></div>';
   h += '<div class="progress-txt"></div>';
+  /* 联机：专注中显示同钓房友头像条 + 共享倒计时（Q17）；房友中途退出入口（Q24/Q7） */
+  if(s.roomCode && room && room.members && room.members.length){
+    h += '<div class="room-live"><span class="room-live-t">同钓 ' + room.members.length + ' 人 · 剩余 ' +
+         '<b id="roomTimer">' + fmtRoomClock(roomElapsedSec(room.focusEndAt || s.endAt)) + '</b></span>' +
+         '<div class="room-live-avs">' + room.members.map(m =>
+           '<span class="room-live-nm">' + esc(m.name || m.username) + '</span>' +
+           (m.avatar ? '<span class="room-live-av">' + avatarSVG(m.avatar) + '</span>' : '')
+         ).join('') + '</div>' +
+         '<button class="btn sm ghost" data-act="roomLeave" style="margin-left:auto">' +
+         (room.role === 'host' ? '解散房间' : '离开房间') + '</button></div>';
+  }
   h += '<div style="font-size:12px;color:var(--muted);margin-top:10px">'+rod.name+(bait?' · '+bait.name:' · 空钩')+(s.sonar?' · 探鱼器已就绪（最后 1 分钟揭示品质）':'')+'</div>';
   if(s.paused) h += '<div style="font-size:12px;color:var(--muted);margin-top:8px">已暂停（暂停期间不计时）</div>';
   h += (s.sonar ? '<div id="sonarReveal" class="sonar-band" style="display:none;margin-top:12px"></div>' : '');
@@ -3507,6 +3551,172 @@ function frMgrOnAct(a, btn){
   return false;
 }
 
+/* ============ 联机房间（实时多人同钓） ============ */
+/* 设计遵循方案：D1 轮询（1.5s）、最多 4 人、房主统一时长全员同步倒计时、
+   凭邀请码可进（不限好友）、房主退出即销毁、普通成员退出仅自己离开、
+   仅等待态可加入（Q22）、等待 30 分钟超时自动销毁（Q25）、无聊天（Q18）。
+   开放项：Q23/Q24 按「已专注时间正常结算」（房主中断/成员中途退出生效），
+   Q26 刷新/断网后凭本地记录的邀请码自动恢复房间（见 roomReconnect）。 */
+let room = null;                 /* 当前所在房间状态；null = 不在房间 */
+let roomPollTimer = null;
+let roomStarted = false;          /* 本轮是否已为本地拉起专注，避免重复 */
+const ROOM_KEY = 'ff_room_code';
+
+function roomPersist(){
+  try{ if(room && room.code) localStorage.setItem(ROOM_KEY, room.code); else localStorage.removeItem(ROOM_KEY); }catch(e){}
+}
+function roomElapsedSec(focusEndAt){ return Math.max(0, Math.round((focusEndAt - Date.now()) / 1000)); }
+function fmtRoomClock(sec){ const m = Math.floor(sec / 60), s = sec % 60; return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s; }
+
+function openRoomHub(){
+  openModal(
+    '<div class="catch">'+
+      '<div class="rname">联机专注房</div>'+
+      '<div class="tiny" style="margin:10px 0;color:var(--muted)">创建房间后把 6 位邀请码发给好友；或输入好友的邀请码加入。最多 4 人，房主统一设定时长，全员同步同一倒计时。</div>'+
+      '<div class="sub-cap">创建房间（默认 25 分钟）</div>'+
+      '<div class="chips" id="roomDurChips">'+
+        [15, 25, 45].map(d => '<button class="chip' + (d === 25 ? ' on' : '') + '" data-roomdur="' + d + '">' + d + ' 分</button>').join('') +
+      '</div>'+
+      '<button class="btn" style="margin-top:10px" data-act="roomCreate">创建并进入</button>'+
+      '<div class="sub-sep"><div class="sub-cap">加入房间</div>'+
+        '<input class="txt" id="roomCodeInput" placeholder="输入 6 位邀请码" maxlength="6" style="text-transform:uppercase;letter-spacing:2px">'+
+        '<button class="btn ghost" style="margin-top:10px" data-act="roomJoin">加入</button>'+
+      '</div>'+
+    '</div>'
+  );
+}
+function roomDurSel(){ const on = document.querySelector('#roomDurChips .chip.on'); return on ? +on.dataset.roomdur : 25; }
+
+async function roomCreate(){
+  const dm = roomDurSel();
+  const r = await api('room/create', { method:'POST', body:{ durationMin: dm } });
+  if(!r.ok){ toast(r.data.msg || '创建失败'); return; }
+  closeModal(); enterRoom(r.data);
+}
+async function roomJoin(){
+  const code = (($('roomCodeInput') && $('roomCodeInput').value) || '').trim().toUpperCase();
+  if(!code){ toast('请输入邀请码'); return; }
+  const r = await api('room/join', { method:'POST', body:{ code } });
+  if(!r.ok){ toast(r.data.msg || '加入失败'); return; }
+  closeModal(); enterRoom(r.data);
+}
+function enterRoom(state){
+  room = state; roomStarted = false; roomPersist();
+  page = 'home'; startRoomPoll(); render();
+}
+async function roomState(){
+  if(!room || !room.code) return null;
+  const r = await api('room/state?code=' + room.code, { method:'GET' });
+  if(!r.ok){
+    if(r.status === 401){ doLogout(); return null; }
+    if(r.status === 404 || r.status === 410){
+      /* 房间被解散（房主退出）或已被移出 → 退出本地房间状态并提示（Q23/Q28） */
+      const wasActive = room.status === 'active';
+      room = null; roomStarted = false; roomPersist(); stopRoomPoll(); render();
+      toast(r.status === 410 ? '你已不在该房间' : (wasActive ? '房主已结束房间' : '房间已解散'));
+      return null;
+    }
+    return room;                                   /* 网络抖动：保留旧状态 */
+  }
+  return r.data;
+}
+function startRoomPoll(){
+  stopRoomPoll();
+  roomPollTimer = setInterval(async () => {
+    const st = await roomState();
+    if(!st) return;
+    const chg = JSON.stringify(st) !== JSON.stringify(room);
+    room = st; roomPersist();
+    if(st.status === 'active' && st.focusEndAt && !S.session && !roomStarted){
+      /* 起钩成功才置位：若钓点未选/时长非法导致 startRoomFocus 中止，
+         下一轮轮询还会再试，不会永久卡在「已拉起」 */
+      if(startRoomFocus(st.focusEndAt, st.durationMin)) roomStarted = true;
+      return;
+    }
+    if(st.status !== 'active') roomStarted = false;
+    if(chg || page === 'home') render();
+  }, 1500);
+}
+function stopRoomPoll(){ if(roomPollTimer){ clearInterval(roomPollTimer); roomPollTimer = null; } }
+async function leaveRoom(){
+  if(!room){ render(); return; }
+  const code = room.code; stopRoomPoll();
+  const r = await api('room/leave', { method:'POST', body:{ code } });
+  room = null; roomStarted = false; roomPersist(); render();
+  if(r && r.data && r.data.destroyed) toast('已解散房间');
+  else toast('已离开房间');
+}
+function startRoomFocus(focusEndAt, durationMin){
+  const locId = ui.loc;
+  if(!locId){ toast('先选一个钓点'); return false; }
+  if(!(durationMin > 0)){ toast('时长要大于 0'); return false; }
+  const rodId  = S.equipped.rod || 'rod_basic';
+  const baitId = S.equipped.bait;
+  if(baitId && ownedBait(baitId) <= 0){ toast('饵料已用完'); S.equipped.bait = null; }
+  const roll = rollFish(locId, durationMin, rodId, S.equipped.bait);
+  const taskName = ui.task.trim();
+  if(taskName){ S.tasks = S.tasks || []; if(!S.tasks.includes(taskName)) S.tasks.push(taskName); }
+  const useSonar = gearOn('it_sonar'), useReel = gearOn('it_reel');
+  /* 已专注的分钟数决定产出权重：中途加入（刷新恢复）时按「剩余时长」计，
+     避免把没钓到的时间也算进本次专注（plannedMs 会被 finish() 用于结算分钟数）。 */
+  const remainMin = Math.max(1, Math.round((focusEndAt - Date.now()) / 60000));
+  const plannedMs = remainMin * 60000;
+  S.session = {
+    kind:'focus', loc:locId, task:taskName, plannedMs,
+    startedAt:Date.now(), endAt:focusEndAt,          /* 锚定房间共享结束时间 */
+    paused:false, pausedMs:null, speed:1, noWear:false,
+    strict:false, rodId, baitId, resultId:roll.fish.id, sonar:useSonar, reel:useReel,
+    roll:{ p:roll.p, ids:roll.fishes.map(f => f.id), effective:roll.effective, tb:roll.tb, w:roll.weights },
+    roomCode: room ? room.code : null
+  };
+  save(); render();
+  return true;
+}
+function renderRoom(){
+  if(!room) return renderHome();
+  const r = room;
+  let h = '<h2 class="sec tbox">联机专注房</h2><div class="card">';
+  h += '<div class="room-code-row"><span>邀请码</span><b class="room-code">' + esc(r.code) + '</b>' +
+       '<button class="btn sm ghost" data-act="roomCopy">复制</button></div>';
+  h += '<div class="tiny" style="color:var(--muted)">你是' + (r.role === 'host' ? '房主' : '成员') + ' · 最多 4 人' +
+       (r.hostName ? ' · 房主 ' + esc(r.hostName) : '') + '</div>';
+  h += '<div class="sub-cap">房友（' + r.members.length + '/4）</div><div class="room-members">';
+  h += r.members.map(m => {
+    const av = m.avatar ? avatarSVG(m.avatar) : '';
+    return '<div class="room-mem"><div class="fr-av">' + (av || '<span style="font-size:18px">🐟</span>') + '</div>' +
+      '<div class="rm-nm">' + esc(m.name || m.username) + (m.role === 'owner' ? ' <span class="rm-host">房主</span>' : '') + '</div>' +
+      '<div class="rm-today tiny">专注 ' + m.today.focusMin + '分 · 鱼 ' + m.today.fish + ' · 金币 ' + m.today.coins + '</div></div>';
+  }).join('');
+  h += '</div>';
+  if(r.status === 'active'){
+    h += '<div class="room-timer" id="roomTimer">' + fmtRoomClock(roomElapsedSec(r.focusEndAt)) + '</div>';
+    h += '<div class="tiny tbox block" style="color:var(--muted)">全员同步倒计时 · 各自独立钓鱼，结束时间到即结算</div>';
+  }else{
+    if(r.role === 'host'){
+      h += '<div class="sub-sep"><div class="sub-cap">专注时长（分钟）</div><div class="chips" id="roomDurChips2">' +
+        [15, 25, 45].map(d => '<button class="chip' + (d === (r.durationMin || 25) ? ' on' : '') + '" data-roomdur="' + d + '">' + d + '</button>').join('') +
+        '</div></div>';
+      h += '<button class="btn" data-act="roomStart"' + (r.members.length < 2 ? ' disabled' : '') + '>开始专注' +
+           (r.members.length < 2 ? '（至少 2 人）' : '') + '</button>';
+      if(r.status === 'ended') h += '<div class="tiny tbox block" style="color:var(--muted)">本轮已结束，可再来一轮或离开</div>';
+    }else{
+      h += '<div class="tbox block" style="color:var(--muted)">' +
+           (r.status === 'ended' ? '本轮已结束，等待房主再来一轮' : '等待房主开始专注…') + '</div>';
+    }
+  }
+  h += '<button class="btn ghost" style="margin-top:10px" data-act="roomLeave">' +
+       (r.role === 'host' ? '解散房间并离开' : '离开房间') + '</button>';
+  h += '</div>';
+  return h;
+}
+async function roomReconnect(){
+  let code = null; try{ code = localStorage.getItem(ROOM_KEY); }catch(e){}
+  if(!code) return;
+  const r = await api('room/state?code=' + code, { method:'GET' });
+  if(!r.ok){ try{ localStorage.removeItem(ROOM_KEY); }catch(e){} return; }
+  room = r.data; roomStarted = false; roomPersist(); startRoomPoll();
+}
+
 function renderStat(){
   return '<h2 class="sec tbox">专注统计</h2>'+
     '<div class="tiny tbox block" style="margin-bottom:10px">累计数据与近 7 天分布；休息时间与放弃的专注不计入。</div>'+
@@ -3757,7 +3967,7 @@ function render(){
   renderTopbar();
   renderTabs();
   const p = $('page');
-  p.innerHTML = page==='home' ? renderHome() : page==='dex' ? renderDex() :
+  p.innerHTML = page==='home' ? (room && !S.session ? renderRoom() : renderHome()) : page==='dex' ? renderDex() :
                 page==='friends' ? renderFriends() :
                 page==='shop' ? renderShop() : page==='stat' ? renderStat() : renderSettings();
   if(page === 'home' && S.session) paintClock();
@@ -3808,6 +4018,16 @@ document.addEventListener('click', e => {
 
   const minBtn = t.closest('[data-min]');
   if(minBtn){ ui.minutes = +minBtn.dataset.min; render(); return; }
+
+  /* 联机时长（15/25/45 分）：弹窗里(#roomDurChips)与房间里(#roomDurChips2)共用一套
+     data-roomdur，选中态由 .chip.on 表示，两处互不干扰（各自容器内切换） */
+  const roomDurBtn = t.closest('[data-roomdur]');
+  if(roomDurBtn){
+    const box = roomDurBtn.parentElement;
+    box.querySelectorAll('.chip').forEach(function(c){ c.classList.remove('on'); });
+    roomDurBtn.classList.add('on');
+    return;
+  }
 
   /* 专注模式（普通 / 严格）：写入 settings.focusMode 并即时刷新 */
   const modeBtn = t.closest('[data-mode]');
@@ -3887,6 +4107,23 @@ document.addEventListener('click', e => {
     else if(a === 'frManage') openFriendManage();
     else if(a === 'frOpen') openFriendDetail(act.dataset.un);
     else if(a === 'frRetry'){ ff.loaded = false; ff.loadErr = false; friendLoad(); }
+    else if(a === 'roomOpen') openRoomHub();
+    else if(a === 'roomCreate') roomCreate();
+    else if(a === 'roomJoin') roomJoin();
+    else if(a === 'roomCopy'){ const c = room && room.code; if(c && navigator.clipboard) navigator.clipboard.writeText(c).then(()=>toast('邀请码已复制'), ()=>toast(c)).catch(()=>toast(c)); else if(c) toast(c); }
+    else if(a === 'roomStart'){
+      const sel = document.querySelector('#roomDurChips2 .chip.on');
+      const dm = sel ? +sel.dataset.roomdur : (room ? room.durationMin || 25 : 25);
+      api('room/start', { method:'POST', body:{ code: room.code, durationMin: dm } }).then(r => {
+        if(!r.ok){ toast(r.data.msg || '开始失败'); return; }
+        enterRoom(r.data);
+      });
+    }
+    else if(a === 'roomLeave'){
+      confirmBox(room && room.role === 'host' ? '解散房间' : '离开房间',
+        room && room.role === 'host' ? '确定解散房间？邀请码失效，所有房友会被请出。' : '确定离开房间？房主和其他房友不受影响。',
+        '确定', () => leaveRoom());
+    }
     return;
   }
 });
@@ -4517,7 +4754,7 @@ function enterGame(){
   const el = $('authRoot'); if(el) el.style.display = 'none';
   document.documentElement.dataset.theme = (S.settings && S.settings.theme) || 'light';
   render();
-  if(auth.mode === 'cloud') syncCloud();
+  if(auth.mode === 'cloud'){ syncCloud(); roomReconnect(); }   /* 刷新/重进后自动恢复上次的房间（Q26） */
 }
 function doLogout(){
   const m = $('acctMenu'); if(m) m.style.display = 'none';   /* 收起账号管理下拉 */
