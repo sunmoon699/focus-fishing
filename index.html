@@ -1,4 +1,4 @@
-<!-- 最新修改时间：2026-10-10 23:56 -->
+<!-- 最新修改时间：2026-10-11 00:45 -->
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
 <head>
@@ -183,15 +183,32 @@ svg{shape-rendering:crispEdges}
 .room-code-row>span{font-size:12px;color:var(--muted);font-weight:700}
 .room-code{flex:1 1 auto;font-size:27px;font-weight:800;letter-spacing:5px;color:var(--accent);
   text-shadow:2px 2px 0 rgba(51,42,78,.12)}
-.room-members{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:9px;margin-top:8px}
-.room-mem{display:flex;align-items:center;gap:9px;padding:9px 10px;background:var(--surface);
-  border:var(--bw) solid var(--ink);border-radius:var(--radius);box-shadow:var(--sh-s)}
-.rm-nm{flex:1 1 auto;min-width:0;font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rm-host{font-size:10.5px;font-weight:700;color:var(--accent);border:1.5px solid var(--accent);
-  border-radius:5px;padding:0 4px;vertical-align:1px}
-.rm-today{flex:none;font-size:11px;color:var(--muted)}
+/* 成员卡：竖向布局 —— 皇冠紧贴头像正上方，再下面是昵称；顺序按加入房间先后（房主最前） */
+.room-members{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:9px;margin-top:8px}
+.room-mem{display:flex;flex-direction:column;align-items:center;gap:2px;padding:9px 6px 8px;
+  background:var(--surface);border:var(--bw) solid var(--ink);border-radius:var(--radius);box-shadow:var(--sh-s)}
+.rm-crown{flex:none;width:26px;height:18px;line-height:0;margin-bottom:-2px}   /* 紧贴头像上沿 */
+.rm-crown svg{width:100%;height:100%;display:block}
+.room-mem .fr-av{width:46px;height:46px;border-radius:10px}
+.room-mem .fr-av-sm{width:46px;height:46px;border-radius:10px}
+.rm-nm{width:100%;text-align:center;font-size:12.5px;font-weight:700;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rm-crown-ph{flex:none;width:26px;height:20px}   /* 非房主占位，保证所有头像同一水平线 */
 .room-timer{font-size:40px;font-weight:800;text-align:center;letter-spacing:2px;margin:14px 0 6px;
   color:var(--text);font-variant-numeric:tabular-nums}
+.room-dur-in{margin-top:8px}
+/* 结算弹窗里的「房间战报」 */
+.rmres{margin-top:12px;padding:10px 11px;background:var(--surface2);border:var(--bw) solid var(--ink);
+  border-radius:10px;text-align:left}
+.rmres-t{font-size:12px;font-weight:800;color:var(--text2);letter-spacing:.06em;margin-bottom:8px}
+.rmres-row{display:flex;align-items:center;gap:8px;padding:5px 0}
+.rmres-row+.rmres-row{border-top:1.5px dashed rgba(51,42,78,.18)}
+.rmres-av{width:28px;height:28px;flex:none;border:var(--bw) solid var(--ink);border-radius:7px;overflow:hidden;background:var(--surface)}
+.rmres-av svg{width:100%;height:100%;display:block}
+.rmres-nm{flex:none;max-width:74px;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rmres-fish{flex:1 1 auto;min-width:0;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rmres-coin{flex:none;font-size:12px;font-weight:800;color:var(--gold)}
+.rmres-wait{flex:1 1 auto;font-size:12px;color:var(--muted)}
 .room-live{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding:9px 11px;
   background:var(--surface2);border:var(--bw) solid var(--ink);border-radius:10px}
 .room-live-t{font-size:11.5px;color:var(--muted);flex:none}
@@ -2307,7 +2324,68 @@ function finish(){
   const brokeName = wearDown();
   S.session = null; save();
   beep(3); buzz(); render();
+  reportRoomResult(s, f, gain);        /* 联机房：把本轮渔获上报到房间战报 */
   showCatch(f, gain, isNew, s, brokeName);
+}
+
+/* ---- 房间战报上报 ----
+   round 用本轮共享的结束时间戳（s.endAt）标识，房主再来一轮时 round 自然变化。
+   失败一律静默：上报只是锦上添花，不能影响本地已经结算完的这一轮。 */
+function reportRoomResult(s, f, gain){
+  if(!s || !s.roomCode) return;
+  api('room/result', { method:'POST', body:{
+    code: s.roomCode, round: String(s.endAt),
+    fishId: f.id, fishName: f.name, rarity: f.rarity,
+    weight: f.weight || 0, coins: gain, focusMin: Math.round(s.plannedMs/60000)
+  }}).catch(() => {});
+}
+
+/* 弹窗里的「房间战报」：拉一次 + 轮询补齐（房友可能还没结算完）。
+   弹窗关闭时由 stopRoomResPoll 统一收定时器。 */
+let roomResTimer = null, roomResReq = null;
+function stopRoomResPoll(){
+  if(roomResTimer){ clearInterval(roomResTimer); roomResTimer = null; }
+  roomResReq = null;
+}
+function mountRoomRes(code, round){
+  const box = $('roomResBox');
+  if(!box) return false;                       /* 弹窗已关就停 */
+  const req = { code: code, round: round };
+  roomResReq = req;
+  const pull = async () => {
+    if(!$('roomResBox') || !roomResReq || roomResReq !== req) return;
+    const r = await api('room/results?code=' + encodeURIComponent(code) + '&round=' + encodeURIComponent(round), { method:'GET' });
+    if(!$('roomResBox') || roomResReq !== req) return;
+    const el = $('roomResBox');
+    if(!el) return;
+    el.innerHTML = r.ok ? roomResHTML(r.data.rows || []) : '<div class="rmres-t">房间战报</div><div class="rmres-wait">暂时取不到房友战果</div>';
+    /* 所有人都结算完就停，避免无谓轮询 */
+    if(r.ok && (r.data.rows || []).every(x => x.done)){ clearInterval(roomResTimer); roomResTimer = null; }
+  };
+  pull();
+  clearInterval(roomResTimer);
+  roomResTimer = setInterval(pull, 2500);
+  setTimeout(() => { clearInterval(roomResTimer); roomResTimer = null; }, 60000);   /* 最多盯 1 分钟 */
+  return true;
+}
+function roomResHTML(rows){
+  let h = '<div class="rmres-t">本房渔获 · ' + rows.filter(x => x.done).length + '/' + rows.length + ' 人已结算</div>';
+  h += rows.map(m => {
+    const av = m.avatar ? avatarSVG(m.avatar) : '';
+    const rar = (m.rarity && RARITY[m.rarity]) ? RARITY[m.rarity] : null;
+    const nm = esc(m.name || m.username);
+    if(!m.done){
+      return '<div class="rmres-row"><div class="rmres-av">' + (av || '🐟') + '</div>' +
+             '<div class="rmres-nm">' + nm + '</div>' +
+             '<div class="rmres-wait">还在钓…</div></div>';
+    }
+    return '<div class="rmres-row"><div class="rmres-av">' + (av || '🐟') + '</div>' +
+           '<div class="rmres-nm">' + nm + '</div>' +
+           '<div class="rmres-fish"' + (rar ? ' style="color:' + rar.color + '"' : '') + '>' +
+             esc(m.fishName || '未知鱼获') + (rar ? ' · ' + rar.name : '') + '</div>' +
+           '<div class="rmres-coin">+' + m.coins + '</div></div>';
+  }).join('');
+  return h;
 }
 function startBreak(min){
   const speed = 1;
@@ -2342,10 +2420,17 @@ function showCatch(f, gain, isNew, s, brokeName){
       (s.strict ? '<div class="tiny" style="color:var(--accent);margin-top:8px">严格模式：本次专注未被退出，渔获价格翻倍结算</div>' : '')+
       (brokeName ? '<div class="tiny" style="color:var(--danger);margin-top:8px">'+brokeName+' 已用坏，自动换回竹木竿</div>' : '')+
       '<div class="detail">'+rows.map(x=>'<div><span>'+x[0]+'</span><span>'+x[1]+'</span></div>').join('')+'</div>'+
+      /* 联机房：本房间所有人这一轮的渔获（含还在钓的房友，会自己补齐） */
+      (s.roomCode
+        ? '<div class="rmres" id="roomResBox"><div class="rmres-t">本房渔获</div>'+
+          '<div class="rmres-wait">正在收齐房友战果…</div></div>'
+        : '')+
     '</div>'+
     '<div class="btn-row"><button class="btn ghost" data-act="break">休息 5 分钟</button><button class="btn" data-act="again">再来一轮</button></div>'+
     '<div class="btn-row"><button class="btn ghost" data-act="close">收下</button></div>'
   );
+  /* 弹窗 DOM 已插入才挂轮询（$ 才能找到 #roomResBox） */
+  if(s.roomCode) mountRoomRes(s.roomCode, String(s.endAt));
 }
 
 /* ============ 弹层 ============ */
@@ -2373,7 +2458,7 @@ function openModal(html, onAct){
   });
   $('modalRoot').appendChild(d);
 }
-function closeModal(){ $('modalRoot').innerHTML = ''; }
+function closeModal(){ stopRoomResPoll(); $('modalRoot').innerHTML = ''; }
 
 /* 应用内自绘的确认框：替代原生 window.confirm()
    ------------------------------------------------------------
@@ -3575,8 +3660,11 @@ function openRoomHub(){
       '<div class="tiny" style="margin:10px 0;color:var(--muted)">创建房间后把 6 位邀请码发给好友；或输入好友的邀请码加入。最多 4 人，房主统一设定时长，全员同步同一倒计时。</div>'+
       '<div class="sub-cap">创建房间（默认 25 分钟）</div>'+
       '<div class="chips" id="roomDurChips">'+
-        [15, 25, 45].map(d => '<button class="chip' + (d === 25 ? ' on' : '') + '" data-roomdur="' + d + '">' + d + ' 分</button>').join('') +
+        [15, 25, 45].map(d => '<button class="chip' + (!roomDurDraft && d === 25 ? ' on' : '') + '" data-roomdur="' + d + '">' + d + ' 分</button>').join('') +
       '</div>'+
+      '<input class="txt room-dur-in" id="roomDurInHub" data-roomdur-in type="number" inputmode="numeric" '+
+        'min="5" max="180" placeholder="自定义时长（5–180 分钟）" value="' + esc(roomDurDraft || '') + '" '+
+        'oninput="roomDurTyped(\'roomDurInHub\',\'roomDurChips\')">'+
       '<button class="btn" style="margin-top:10px" data-act="roomCreate">创建并进入</button>'+
       '<div class="sub-sep"><div class="sub-cap">加入房间</div>'+
         '<input class="txt" id="roomCodeInput" placeholder="输入 6 位邀请码" maxlength="6" style="text-transform:uppercase;letter-spacing:2px">'+
@@ -3585,7 +3673,8 @@ function openRoomHub(){
     '</div>'
   );
 }
-function roomDurSel(){ const on = document.querySelector('#roomDurChips .chip.on'); return on ? +on.dataset.roomdur : 25; }
+function roomDurSel(){ return roomDurVal('roomDurInHub', 'roomDurChips'); }
+function roomDurSel2(){ return roomDurVal('roomDurInRoom', 'roomDurChips2'); }
 
 async function roomCreate(){
   const dm = roomDurSel();
@@ -3603,6 +3692,43 @@ async function roomJoin(){
 function enterRoom(state){
   room = state; roomStarted = false; roomPersist();
   page = 'home'; startRoomPoll(); render();
+}
+
+/* ---- 房主自定义专注时长 ----
+   预设 chips 与输入框二选一：动输入框即取消 chip 选中，点 chip 即清空输入框。
+   roomDurDraft 保存"正在输入的草稿"，因为房间页会随轮询重建 DOM，
+   render 时需要靠它把输入值回填回去（配合 renderKeepFocus 保住光标）。 */
+let roomDurDraft = null;
+function roomDurTyped(inputId, chipsId){
+  const el = $(inputId); const box = $(chipsId);
+  if(box) box.querySelectorAll('.chip').forEach(function(c){ c.classList.remove('on'); });
+  roomDurDraft = (el && el.value) ? el.value : null;
+}
+function roomDurClearInput(chipsBox){
+  /* 点了预设 chip → 清掉同一容器内的自定义输入 */
+  const wrap = chipsBox && chipsBox.parentElement;
+  if(!wrap) return;
+  const el = wrap.querySelector('input[data-roomdur-in]');
+  if(el) el.value = '';
+  roomDurDraft = null;
+}
+function roomDurVal(inputId, chipsId){
+  const el = $(inputId);
+  let v = el ? parseInt(el.value, 10) : (roomDurDraft ? parseInt(roomDurDraft, 10) : NaN);
+  if(!isNaN(v) && v > 0) return Math.max(5, Math.min(180, v));   /* 越界钳制到 5–180 */
+  const on = chipsId ? document.querySelector('#' + chipsId + ' .chip.on') : null;
+  return on ? +on.dataset.roomdur : 25;
+}
+/* 房主皇冠：贴在头像正上方，仅标记房主身份（替代原来的「房主」文字徽章） */
+function crownSVG(){
+  return '<svg viewBox="0 0 32 22" width="26" height="18" aria-hidden="true">'+
+    '<circle cx="16" cy="2.6" r="2.4" fill="#FFD34D" stroke="#332A4E" stroke-width="1.6"/>'+
+    '<circle cx="4.2" cy="6" r="2.2" fill="#FFD34D" stroke="#332A4E" stroke-width="1.6"/>'+
+    '<circle cx="27.8" cy="6" r="2.2" fill="#FFD34D" stroke="#332A4E" stroke-width="1.6"/>'+
+    '<path d="M4.2 6 L8.6 15 L23.4 15 L27.8 6 L21.4 11.5 L16 6.6 L10.6 11.5 Z" '+
+      'fill="#FFD34D" stroke="#332A4E" stroke-width="1.6" stroke-linejoin="round"/>'+
+    '<rect x="7" y="15.6" width="18" height="4.4" rx="1" fill="#FFC42E" stroke="#332A4E" stroke-width="1.6"/>'+
+  '</svg>';
 }
 async function roomState(){
   if(!room || !room.code) return null;
@@ -3634,7 +3760,9 @@ function startRoomPoll(){
       return;
     }
     if(st.status !== 'active') roomStarted = false;
-    if(chg || page === 'home') render();
+    /* 只在状态真的变了才重绘。原来每 1.5s 无条件 render，会把房主正在输入的
+       「自定义时长」输入框连值带焦点一起冲掉；改用 renderKeepFocus 再兜一层保险。 */
+    if(chg) renderKeepFocus();
   }, 1500);
 }
 function stopRoomPoll(){ if(roomPollTimer){ clearInterval(roomPollTimer); roomPollTimer = null; } }
@@ -3681,11 +3809,15 @@ function renderRoom(){
   h += '<div class="tiny" style="color:var(--muted)">你是' + (r.role === 'host' ? '房主' : '成员') + ' · 最多 4 人' +
        (r.hostName ? ' · 房主 ' + esc(r.hostName) : '') + '</div>';
   h += '<div class="sub-cap">房友（' + r.members.length + '/4）</div><div class="room-members">';
+  /* 顺序由后端给出：房主在前、其余按加入房间先后。这里不重排，原样渲染。
+     房主头像上方不放文字徽章，改用皇冠图标紧贴头像；其他成员用等高占位保证对齐。 */
   h += r.members.map(m => {
     const av = m.avatar ? avatarSVG(m.avatar) : '';
-    return '<div class="room-mem"><div class="fr-av">' + (av || '<span style="font-size:18px">🐟</span>') + '</div>' +
-      '<div class="rm-nm">' + esc(m.name || m.username) + (m.role === 'owner' ? ' <span class="rm-host">房主</span>' : '') + '</div>' +
-      '<div class="rm-today tiny">专注 ' + m.today.focusMin + '分 · 鱼 ' + m.today.fish + ' · 金币 ' + m.today.coins + '</div></div>';
+    const isOwner = m.role === 'owner';
+    return '<div class="room-mem">' +
+      (isOwner ? '<div class="rm-crown">' + crownSVG() + '</div>' : '<div class="rm-crown-ph"></div>') +
+      '<div class="fr-av">' + (av || '<span style="font-size:18px">🐟</span>') + '</div>' +
+      '<div class="rm-nm">' + esc(m.name || m.username) + '</div></div>';
   }).join('');
   h += '</div>';
   if(r.status === 'active'){
@@ -3694,8 +3826,12 @@ function renderRoom(){
   }else{
     if(r.role === 'host'){
       h += '<div class="sub-sep"><div class="sub-cap">专注时长（分钟）</div><div class="chips" id="roomDurChips2">' +
-        [15, 25, 45].map(d => '<button class="chip' + (d === (r.durationMin || 25) ? ' on' : '') + '" data-roomdur="' + d + '">' + d + '</button>').join('') +
-        '</div></div>';
+        [15, 25, 45].map(d => '<button class="chip' + (!roomDurDraft && d === (r.durationMin || 25) ? ' on' : '') + '" data-roomdur="' + d + '">' + d + '</button>').join('') +
+        '</div>' +
+        /* 房主可自行输入时长：5–180 分钟，输入即取消预设 chip 的选中 */
+        '<input class="txt room-dur-in" id="roomDurInRoom" data-roomdur-in type="number" inputmode="numeric" ' +
+        'min="5" max="180" placeholder="自定义时长（5–180 分钟）" value="' + esc(roomDurDraft || '') + '" ' +
+        'oninput="roomDurTyped(\'roomDurInRoom\',\'roomDurChips2\')"></div>';
       h += '<button class="btn" data-act="roomStart"' + (r.members.length < 2 ? ' disabled' : '') + '>开始专注' +
            (r.members.length < 2 ? '（至少 2 人）' : '') + '</button>';
       if(r.status === 'ended') h += '<div class="tiny tbox block" style="color:var(--muted)">本轮已结束，可再来一轮或离开</div>';
@@ -3976,6 +4112,25 @@ function render(){
   clearInterval(tickTimer);
   tickTimer = setInterval(tick, 250);
 }
+/* 重绘并保留输入焦点/光标位置。
+   页面是用 innerHTML 整体重绘的，任何 <input> 都会连同 DOM 一起被换掉，
+   正在打字的人会丢失焦点和光标。这里在重绘前后记录 activeElement 的
+   id + selectionStart/End，重绘后按 id 找回同名节点并复原。
+   （房间页会被轮询重绘，房主的「自定义时长」输入框依赖它。） */
+function renderKeepFocus(){
+  const a = document.activeElement;
+  let id = null, sel = null;
+  if(a && a.id && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')){
+    id = a.id;
+    try{ sel = [a.selectionStart, a.selectionEnd]; }catch(e){ sel = null; }
+  }
+  render();
+  if(!id) return;
+  const el = $(id);
+  if(!el) return;
+  try{ el.focus(); }catch(e){}
+  try{ if(sel && el.setSelectionRange) el.setSelectionRange(sel[0], sel[1]); }catch(e){}
+}
 function renderTopbar(){
   const c = $('avatarChip'); if(c) c.innerHTML = avatarSVG(S.profile.avatar);
   const sh = $('shopIc'); if(sh) sh.innerHTML = pixIcon('shop');
@@ -4026,6 +4181,7 @@ document.addEventListener('click', e => {
     const box = roomDurBtn.parentElement;
     box.querySelectorAll('.chip').forEach(function(c){ c.classList.remove('on'); });
     roomDurBtn.classList.add('on');
+    roomDurClearInput(box);           /* 选了预设就清掉自定义输入框，二者互斥 */
     return;
   }
 
@@ -4112,10 +4268,13 @@ document.addEventListener('click', e => {
     else if(a === 'roomJoin') roomJoin();
     else if(a === 'roomCopy'){ const c = room && room.code; if(c && navigator.clipboard) navigator.clipboard.writeText(c).then(()=>toast('邀请码已复制'), ()=>toast(c)).catch(()=>toast(c)); else if(c) toast(c); }
     else if(a === 'roomStart'){
-      const sel = document.querySelector('#roomDurChips2 .chip.on');
-      const dm = sel ? +sel.dataset.roomdur : (room ? room.durationMin || 25 : 25);
+      /* 房主可自定义时长：优先读输入框（5–180），没填才用预设 chip */
+      const dm = roomDurSel2();
+      const wasDraft = roomDurDraft;
       api('room/start', { method:'POST', body:{ code: room.code, durationMin: dm } }).then(r => {
         if(!r.ok){ toast(r.data.msg || '开始失败'); return; }
+        roomDurDraft = null;                 /* 本轮时长已确定，清掉草稿，避免残留到下一轮 */
+        if(wasDraft) toast('已设为 ' + Math.max(5, Math.min(180, parseInt(wasDraft,10) || 25)) + ' 分钟');
         enterRoom(r.data);
       });
     }

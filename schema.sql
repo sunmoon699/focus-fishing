@@ -1,6 +1,6 @@
 /* ============================================================
    专注钓鱼 —— Cloudflare D1 数据库表结构
-   最新修改时间：2026-10-10 22:47
+   最新修改时间：2026-10-11 00:45
    ------------------------------------------------------------
    建库命令（只需执行一次）：
      npx wrangler d1 create focus-fishing-db
@@ -118,6 +118,25 @@ CREATE TABLE IF NOT EXISTS room_players (
   role      TEXT    NOT NULL DEFAULT 'member',
   joined_at INTEGER NOT NULL,
   PRIMARY KEY (room_id, user_id),
+  FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id)  REFERENCES users(id) ON DELETE CASCADE
+);
+
+/* 房间战报：一轮结束后每个人的渔获。
+   round 用该轮的 focus_end_at 时间戳字符串标识，房主再来一轮时 round 自然变化；
+   主键保证同一轮重复上报只是覆盖（幂等）。2026-10-11 新增，供结算弹窗展示。 */
+CREATE TABLE IF NOT EXISTS room_results (
+  room_id   INTEGER NOT NULL,
+  round     TEXT    NOT NULL,
+  user_id   INTEGER NOT NULL,
+  fish_id   TEXT,
+  fish_name TEXT,
+  rarity    TEXT,
+  weight    INTEGER NOT NULL DEFAULT 0,
+  coins     INTEGER NOT NULL DEFAULT 0,
+  focus_min INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (room_id, round, user_id),
   FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id)  REFERENCES users(id) ON DELETE CASCADE
 );

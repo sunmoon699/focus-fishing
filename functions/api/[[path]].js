@@ -1,6 +1,6 @@
 /* ============================================================
    专注钓鱼 —— Cloudflare Pages Functions 后端（账号 + 云存档）
-   最新修改时间：2026-10-10 23:56
+   最新修改时间：2026-10-11 00:45
    ------------------------------------------------------------
    这是一个 catch-all 路由（functions/api/[[path]].js），
    一个文件收拢全部接口，避免额外的辅助文件被误当成路由暴露。
@@ -230,10 +230,22 @@ const SOCIAL_DDL = [
     "status TEXT NOT NULL DEFAULT 'waiting', duration_min INTEGER NOT NULL DEFAULT 25, " +
     'started_at INTEGER, focus_end_at INTEGER, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)',
   'CREATE INDEX IF NOT EXISTS idx_rooms_code ON rooms(code)',
+  /* 房主统一设定时长（16:34 起支持房主自定义输入 5–180 分钟），全员共享同一 focus_end_at。 */
   'CREATE TABLE IF NOT EXISTS room_players (' +
     'room_id INTEGER NOT NULL, user_id INTEGER NOT NULL, ' +
     "role TEXT NOT NULL DEFAULT 'member', joined_at INTEGER NOT NULL, " +
     'PRIMARY KEY (room_id, user_id), ' +
+    'FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE, ' +
+    'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
+  /* 一轮结束后每个人的渔获（供"房间战报"弹窗展示）。
+     round 用该轮的 focus_end_at 时间戳字符串标识，房主再来一轮时 round 自然变化；
+     PRIMARY KEY(room_id, round, user_id) 保证重复上报只是覆盖（幂等）。 */
+  'CREATE TABLE IF NOT EXISTS room_results (' +
+    'room_id INTEGER NOT NULL, round TEXT NOT NULL, user_id INTEGER NOT NULL, ' +
+    'fish_id TEXT, fish_name TEXT, rarity TEXT, weight INTEGER NOT NULL DEFAULT 0, ' +
+    'coins INTEGER NOT NULL DEFAULT 0, focus_min INTEGER NOT NULL DEFAULT 0, ' +
+    'created_at INTEGER NOT NULL, ' +
+    'PRIMARY KEY (room_id, round, user_id), ' +
     'FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE, ' +
     'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)'
 ];
@@ -467,7 +479,9 @@ async function cleanupRooms(env){
 async function buildRoomState(env, room, uid){
   const rows = await env.DB.prepare(
     'SELECT p.user_id AS uid, p.role AS role, u.username AS username ' +
-    'FROM room_players p JOIN users u ON u.id = p.user_id WHERE p.room_id = ?'
+    'FROM room_players p JOIN users u ON u.id = p.user_id WHERE p.room_id = ? ' +
+    /* 房主在最前，其余按加入房间的先后（不是昵称），保证头像条顺序稳定 */
+    "ORDER BY (p.role = 'owner') DESC, p.joined_at ASC, p.user_id ASC"
   ).bind(room.id).all();
   const date = todayStrLocal();
   const members = [];
@@ -579,6 +593,68 @@ async function handleRoomStart(req, env, uid){
   return ok(await buildRoomState(env, room, uid));
 }
 
+/* ---- 房间战报：一轮结束后每个人的渔获 ---- */
+
+/* 成员列表 + 各人本轮渔获（未上报道或未结算的为 done:false）。
+   顺序同房间成员列表：房主在前，其余按加入先后。 */
+async function handleRoomResults(req, env, uid){
+  await cleanupRooms(env);
+  const sp = new URL(req.url).searchParams;
+  const code = (sp.get('code') || '').trim().toUpperCase();
+  const round = (sp.get('round') || '').trim();
+  if(!code) return bad('缺少邀请码');
+  if(!round) return bad('缺少轮次');
+  const room = await env.DB.prepare('SELECT * FROM rooms WHERE UPPER(code) = ?').bind(code).first();
+  if(!room) return bad('房间不存在或已解散', 404);
+  const rows = await env.DB.prepare(
+    'SELECT p.user_id AS uid, p.role AS role, u.username AS username ' +
+    'FROM room_players p JOIN users u ON u.id = p.user_id WHERE p.room_id = ? ' +
+    "ORDER BY (p.role = 'owner') DESC, p.joined_at ASC, p.user_id ASC"
+  ).bind(room.id).all();
+  const out = [];
+  for(const p of (rows && rows.results) || []){
+    const prof = await getProfile(env, p.uid);
+    const res = await env.DB.prepare(
+      'SELECT * FROM room_results WHERE room_id=? AND round=? AND user_id=?'
+    ).bind(room.id, round, p.uid).first();
+    out.push({
+      uid: p.uid, username: p.username, name: prof.name, avatar: prof.avatar, role: p.role,
+      done: !!res,
+      fishId: res ? res.fish_id : null, fishName: res ? res.fish_name : null,
+      rarity: res ? res.rarity : null, weight: res ? res.weight : 0,
+      coins: res ? res.coins : 0, focusMin: res ? res.focus_min : 0
+    });
+  }
+  return ok({ rows: out, status: room.status, durationMin: room.duration_min });
+}
+
+/* 上报自己本轮的渔获（幂等：同一轮重复上报以最后一次为准）。
+   注意：允许已在本轮结束后、但仍是房间成员的人上报；非成员会被拒绝，
+   不过这不影响本地结算，前端对失败静默处理。 */
+async function handleRoomResult(req, env, uid){
+  const b = await readJson(req);
+  const code = (b.code || '').trim().toUpperCase();
+  const round = String(b.round || '').trim();
+  if(!code) return bad('缺少邀请码');
+  if(!round) return bad('缺少轮次');
+  const room = await env.DB.prepare('SELECT * FROM rooms WHERE UPPER(code) = ?').bind(code).first();
+  if(!room) return bad('房间不存在或已解散', 404);
+  const inRoom = await env.DB.prepare('SELECT 1 FROM room_players WHERE room_id=? AND user_id=?').bind(room.id, uid).first();
+  if(!inRoom) return bad('你已不在该房间', 410);
+  await env.DB.prepare(
+    'INSERT OR REPLACE INTO room_results(room_id, round, user_id, fish_id, fish_name, rarity, weight, coins, focus_min, created_at) ' +
+    'VALUES(?,?,?,?,?,?,?,?,?,?)'
+  ).bind(room.id, round, uid,
+    String(b.fishId || '').slice(0, 64), String(b.fishName || '').slice(0, 64),
+    String(b.rarity || '').slice(0, 16),
+    Math.max(0, parseInt(b.weight, 10) || 0),
+    Math.max(0, parseInt(b.coins, 10) || 0),
+    Math.max(0, parseInt(b.focusMin, 10) || 0), Date.now()).run();
+  return ok({ saved: true });
+}
+
+/* ---- 房间列表 / 路由注册见下方 onRequest ---- */
+
 async function handleRoomLeave(req, env, uid){
   const b = await readJson(req);
   const code = (b.code || '').trim().toUpperCase();
@@ -667,7 +743,8 @@ export async function onRequest(context){
 
     /* 房间联机（需登录） */
     if(path === 'room/create'  || path === 'room/join'    || path === 'room/state' ||
-       path === 'room/start'   || path === 'room/leave'){
+       path === 'room/start'   || path === 'room/leave'   || path === 'room/result' ||
+       path === 'room/results'){
       const u = await resolveUser(env, request);
       if(!u) return bad('登录已失效，请重新登录', 401);
       await ensureSocialSchema(env);   /* 顺带保证 rooms / room_players 等表存在 */
@@ -676,6 +753,8 @@ export async function onRequest(context){
       if(path === 'room/state'){       if(request.method!=='GET')  return bad('方法不支持',405); return await handleRoomState(request, env, u.uid); }
       if(path === 'room/start'){       if(request.method!=='POST') return bad('方法不支持',405); return await handleRoomStart(request, env, u.uid); }
       if(path === 'room/leave'){       if(request.method!=='POST') return bad('方法不支持',405); return await handleRoomLeave(request, env, u.uid); }
+      if(path === 'room/result'){      if(request.method!=='POST') return bad('方法不支持',405); return await handleRoomResult(request, env, u.uid); }
+      if(path === 'room/results'){     if(request.method!=='GET')  return bad('方法不支持',405); return await handleRoomResults(request, env, u.uid); }
       return bad('未知接口', 404);
     }
 
