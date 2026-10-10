@@ -1,5 +1,6 @@
 /* ============================================================
    专注钓鱼 —— Cloudflare Pages Functions 后端（账号 + 云存档）
+   最新修改时间：2026-10-10 22:47
    ------------------------------------------------------------
    这是一个 catch-all 路由（functions/api/[[path]].js），
    一个文件收拢全部接口，避免额外的辅助文件被误当成路由暴露。
@@ -198,6 +199,55 @@ async function handleSavePut(req, env, uid){
 }
 
 /* ---------- 社交 / 统计（联机前置） ---------- */
+
+/* 自动建表（自愈）：线上 D1 若还停留在旧版 schema（只有 users/saves/sessions），
+   访问好友接口会报 "D1_ERROR: no such table: friends"。
+   这里在首次社交请求时把缺失的表按 IF NOT EXISTS 补齐，每个 isolate 只跑一次，
+   已存在的表不会被动到，用户数据零风险。 */
+const SOCIAL_DDL = [
+  'CREATE TABLE IF NOT EXISTS friends (' +
+    'user_id INTEGER NOT NULL, friend_id INTEGER NOT NULL, ' +
+    'starred INTEGER NOT NULL DEFAULT 0, last_interact INTEGER NOT NULL DEFAULT 0, ' +
+    'created_at INTEGER NOT NULL, PRIMARY KEY (user_id, friend_id), ' +
+    'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, ' +
+    'FOREIGN KEY (friend_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'CREATE TABLE IF NOT EXISTS friend_requests (' +
+    'from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, created_at INTEGER NOT NULL, ' +
+    'PRIMARY KEY (from_id, to_id), ' +
+    'FOREIGN KEY (from_id) REFERENCES users(id) ON DELETE CASCADE, ' +
+    'FOREIGN KEY (to_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'CREATE TABLE IF NOT EXISTS notifications (' +
+    'id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, type TEXT NOT NULL, ' +
+    'from_id INTEGER, from_name TEXT, read INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, ' +
+    'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read)',
+  'CREATE TABLE IF NOT EXISTS daily_stats (' +
+    'user_id INTEGER NOT NULL, date TEXT NOT NULL, focus_min INTEGER NOT NULL DEFAULT 0, ' +
+    'fish INTEGER NOT NULL DEFAULT 0, coins INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, ' +
+    'PRIMARY KEY (user_id, date), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'CREATE TABLE IF NOT EXISTS rooms (' +
+    'id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE, host_id INTEGER NOT NULL, ' +
+    "status TEXT NOT NULL DEFAULT 'waiting', duration_min INTEGER NOT NULL DEFAULT 25, " +
+    'started_at INTEGER, focus_end_at INTEGER, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)',
+  'CREATE INDEX IF NOT EXISTS idx_rooms_code ON rooms(code)',
+  'CREATE TABLE IF NOT EXISTS room_players (' +
+    'room_id INTEGER NOT NULL, user_id INTEGER NOT NULL, ' +
+    "role TEXT NOT NULL DEFAULT 'member', joined_at INTEGER NOT NULL, " +
+    'PRIMARY KEY (room_id, user_id), ' +
+    'FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE, ' +
+    'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)'
+];
+let socialSchemaReady = false;   /* isolate 级缓存，避免每次请求都建表 */
+async function ensureSocialSchema(env){
+  if(socialSchemaReady) return true;
+  let failed = 0;
+  for(const sql of SOCIAL_DDL){
+    try{ await env.DB.prepare(sql).run(); }
+    catch(e){ failed++; console.error('[schema] 建表失败：' + (e && e.message)); }
+  }
+  if(!failed) socialSchemaReady = true;
+  return !failed;
+}
 
 function todayStrLocal(){
   const d = new Date(), p = n => ('0' + n).slice(-2);
@@ -442,6 +492,7 @@ export async function onRequest(context){
        path === 'notification/read' || path === 'stats/report'   || path === 'account/delete'){
       const u = await resolveUser(env, request);
       if(!u) return bad('登录已失效，请重新登录', 401);
+      await ensureSocialSchema(env);   /* 线上 D1 缺社交表时自动补齐（IF NOT EXISTS，不动已有数据） */
       if(path === 'friend/search'){        if(request.method!=='POST') return bad('方法不支持',405); return await handleFriendSearch(request, env, u.uid); }
       if(path === 'friend/request'){       if(request.method!=='POST') return bad('方法不支持',405); return await handleFriendRequest(request, env, u.uid, u.username); }
       if(path === 'friend/accept'){        if(request.method!=='POST') return bad('方法不支持',405); return await handleFriendAccept(request, env, u.uid, u.username); }

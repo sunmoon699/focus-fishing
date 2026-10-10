@@ -1,5 +1,6 @@
 /* ============================================================
    专注钓鱼 —— Cloudflare D1 数据库表结构
+   最新修改时间：2026-10-10 22:47
    ------------------------------------------------------------
    建库命令（只需执行一次）：
      npx wrangler d1 create focus-fishing-db
@@ -45,24 +46,78 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_exp  ON sessions(expires_at);
 
 /* ============================================================
-   【联机阶段预留】以下是「实时多人同钓」才需要的表，
-   现在先不启用，等你确认要做联机时再取消注释执行。
+   联机前置：好友 / 通知 / 每日统计
+   房间（rooms / room_players）也一并建好，联机阶段直接启用。
    ============================================================ */
 
--- CREATE TABLE IF NOT EXISTS rooms (
---   id          TEXT PRIMARY KEY,          -- 房间号
---   host_id     INTEGER NOT NULL,
---   loc         TEXT NOT NULL,             -- 钓点
---   created_at  INTEGER NOT NULL,
---   expires_at  INTEGER NOT NULL
--- );
+/* 好友关系：互为两条记录（A→B 与 B→A）。starred 标记星标，last_interact 用于「最近互动」排序 */
+CREATE TABLE IF NOT EXISTS friends (
+  user_id       INTEGER NOT NULL,
+  friend_id     INTEGER NOT NULL,
+  starred       INTEGER NOT NULL DEFAULT 0,
+  last_interact INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  PRIMARY KEY (user_id, friend_id),
+  FOREIGN KEY (user_id)   REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (friend_id) REFERENCES users(id) ON DELETE CASCADE
+);
 
--- CREATE TABLE IF NOT EXISTS room_players (
---   room_id     TEXT NOT NULL,
---   user_id     INTEGER NOT NULL,
---   username    TEXT NOT NULL,
---   joined_at   INTEGER NOT NULL,
---   last_seen   INTEGER NOT NULL,          -- 心跳：用于判断掉线
---   catches     INTEGER NOT NULL DEFAULT 0,
---   PRIMARY KEY (room_id, user_id)
--- );
+/* 好友申请：from_id 申请 to_id；未处理超 10 天由接口自动清理（Q8） */
+CREATE TABLE IF NOT EXISTS friend_requests (
+  from_id    INTEGER NOT NULL,
+  to_id      INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (from_id, to_id),
+  FOREIGN KEY (from_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (to_id)   REFERENCES users(id) ON DELETE CASCADE
+);
+
+/* 通知：好友申请 / 通过 / 被拒绝 / 被删除 各落一条，前端通知区读取 */
+CREATE TABLE IF NOT EXISTS notifications (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL,
+  type       TEXT    NOT NULL,   -- friend_request | friend_accepted | request_rejected | friend_removed
+  from_id    INTEGER,
+  from_name  TEXT,
+  read       INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read);
+
+/* 每日统计：按用户 + 本地日期存当天专注分钟 / 鱼数 / 金币，供好友列表读取 */
+CREATE TABLE IF NOT EXISTS daily_stats (
+  user_id    INTEGER NOT NULL,
+  date       TEXT    NOT NULL,   -- YYYY-MM-DD（玩家本地日期）
+  focus_min  INTEGER NOT NULL DEFAULT 0,
+  fish       INTEGER NOT NULL DEFAULT 0,
+  coins      INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, date),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+/* 房间：code 为 6 位邀请码（对外），status: waiting | active | ended（联机阶段启用） */
+CREATE TABLE IF NOT EXISTS rooms (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  code         TEXT    NOT NULL UNIQUE,
+  host_id      INTEGER NOT NULL,
+  status       TEXT    NOT NULL DEFAULT 'waiting',
+  duration_min INTEGER NOT NULL DEFAULT 25,
+  started_at   INTEGER,
+  focus_end_at INTEGER,
+  created_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rooms_code ON rooms(code);
+
+/* 房间成员：role: owner | member（联机阶段启用） */
+CREATE TABLE IF NOT EXISTS room_players (
+  room_id   INTEGER NOT NULL,
+  user_id   INTEGER NOT NULL,
+  role      TEXT    NOT NULL DEFAULT 'member',
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (room_id, user_id),
+  FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id)  REFERENCES users(id) ON DELETE CASCADE
+);
