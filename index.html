@@ -453,6 +453,19 @@ html[data-theme="dark"] .price{color:var(--ink)}
   font-size:12px;font-weight:700;box-shadow:var(--sh-s)}
 .mini:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(51,42,78,.28)}
 
+/* 账号管理下拉（设置页：账号卡片内） */
+.acct-menu-wrap{position:relative;flex:none}
+.acct-menu-wrap .caret{font-size:10px;opacity:.7}
+.acct-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;
+  background:var(--surface);border:var(--bw) solid var(--ink);border-radius:10px;
+  box-shadow:4px 4px 0 rgba(51,42,78,.18);min-width:128px;overflow:hidden}
+.acct-item{display:block;width:100%;text-align:left;padding:10px 13px;background:none;
+  border:none;border-bottom:var(--bw) solid var(--ink);font:inherit;font-size:13px;
+  font-weight:600;color:var(--text);cursor:pointer}
+.acct-item:last-child{border-bottom:none}
+.acct-item:hover{background:var(--surface2)}
+.acct-item.danger{color:var(--danger)}
+
 /* tabbar */
 .tabbar{
   position:fixed;left:0;right:0;bottom:0;z-index:30;
@@ -2985,7 +2998,13 @@ function renderSettings(){
         : '数据仅保存在本机，登录后才能跨设备继续')+'</div>'+
     '</div>'+
     (auth.mode === 'cloud'
-      ? '<button class="mini ghost" data-act="logout">退出登录</button>'
+      ? '<div class="acct-menu-wrap">'+
+          '<button class="mini ghost" data-act="acctMenu">账号管理 <span class="caret">▾</span></button>'+
+          '<div class="acct-menu" id="acctMenu" style="display:none">'+
+            '<button class="acct-item" data-act="logout">退出登录</button>'+
+            '<button class="acct-item danger" data-act="delAcct">注销账号</button>'+
+          '</div>'+
+        '</div>'
       : '<button class="mini" data-act="goAuth">登录 / 注册</button>')+
   '</div></div>';
 
@@ -3122,9 +3141,11 @@ function statBody(){
   const st = statCollect();
   const openLoc = LOCATIONS.filter(isLocOpen).length;
   const tl = todayLogs();
-  const todayMin   = tl.reduce((a,b)=>a+(b.minutes||0),0);
-  const todayFish  = tl.filter(l=>l.fish).length;
-  const todayCoins = tl.reduce((a,b)=>a+(b.price||0),0);
+  /* 今日专注只统计成功完成的专注；放弃的专注（l.fish 为空，gave:true）不计入（与累计口径一致） */
+  const tlDone     = tl.filter(l => l.fish);
+  const todayMin   = tlDone.reduce((a,b)=>a+(b.minutes||0),0);
+  const todayFish  = tlDone.length;
+  const todayCoins = tlDone.reduce((a,b)=>a+(b.price||0),0);
   let h = '';
   /* 概览：累计指标 + 图鉴收集 + 钓点解锁数量（图鉴与钓点按需求从「今日数据」迁入概览） */
   h += '<div class="card"><div class="bar-cap">概览</div>'+
@@ -3748,6 +3769,11 @@ function renderTopbar(){
 document.addEventListener('click', e => {
   const t = e.target;
 
+  /* 账号管理下拉：点击落在下拉容器外时收起（容器含按钮与菜单） */
+  if(!t.closest('.acct-menu-wrap')){
+    document.querySelectorAll('.acct-menu').forEach(function(m){ if(m.style.display !== 'none') m.style.display = 'none'; });
+  }
+
   const tabBtn = t.closest('[data-page]');
   if(tabBtn){ page = tabBtn.dataset.page; ui.editingName=false; render(); return; }
   const avatarChip = t.closest('[data-avatar]');
@@ -3847,6 +3873,8 @@ document.addEventListener('click', e => {
     else if(a === 'saveName'){ const i=$('nameInput'); const v=(i?i.value:'').trim(); if(v){ S.profile.name = v.slice(0,12); save(); } ui.editingName=false; render(); }
     else if(a === 'cancelName'){ ui.editingName=false; render(); }
     else if(a === 'logout') doLogout();
+    else if(a === 'acctMenu'){ const m = $('acctMenu'); if(m) m.style.display = (m.style.display === 'none' ? '' : 'none'); }
+    else if(a === 'delAcct') deleteAccount();
     else if(a === 'goAuth'){ auth.mode = 'offline'; showAuth('login'); }
     else if(a === 'frAdd') openFriendAdd();
     else if(a === 'frNotif') openFriendNotifs();
@@ -4486,6 +4514,7 @@ function enterGame(){
   if(auth.mode === 'cloud') syncCloud();
 }
 function doLogout(){
+  const m = $('acctMenu'); if(m) m.style.display = 'none';   /* 收起账号管理下拉 */
   confirmBox('退出登录', '退出后将回到登录界面，当前进度已保存在云端。', '退出登录', function(){
     api('logout', { method:'POST' });
     clearAuth();
@@ -4494,6 +4523,21 @@ function doLogout(){
     save();
     showAuth('login');
   });
+}
+/* 注销账号：二次强警告后删除云端账号与全部数据，并清本机 */
+function deleteAccount(){
+  const m = $('acctMenu'); if(m) m.style.display = 'none';   /* 收起账号管理下拉 */
+  confirmBox('注销账号',
+    '此操作将永久删除你的账号，以及云端存档、好友关系、今日与历史统计等全部数据，且无法恢复；你在其他钓友的列表中也会消失。确定要注销吗？',
+    '注销账号', function(){
+      const btn = document.querySelector('.acct-item.danger');
+      if(btn) btn.disabled = true;
+      api('account/delete', { method:'POST' }).then(function(r){
+        if(!r || !r.ok){ toast(r && r.msg ? r.msg : '注销失败，请重试'); if(btn) btn.disabled = false; return; }
+        clearAuth(); auth.mode = 'offline'; S = DEFAULT(); save(); showAuth('login');
+        toast('账号已注销');
+      }).catch(function(){ toast('网络错误，注销失败'); if(btn) btn.disabled = false; });
+    });
 }
 /* 启动入口：有会话先同步云端存档，没有则先显示登录界面 */
 function boot(){
