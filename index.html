@@ -3308,7 +3308,12 @@ async function frSearchInput(e){
   if(send) send.style.display = 'none';
   try{
     const r = await api('friend/search', { method:'POST', body:{ username:u } });
-    if(!r || !r.ok){ res.innerHTML = '<div class="tiny err">'+(r && r.msg ? esc(r.msg) : '搜索失败')+'</div>'; return; }
+    if(!r || !r.ok){
+      const msg = (r && r.data && r.data.msg) ? r.data.msg : ('请求失败' + (r && r.status ? '('+r.status+')' : ''));
+      res.innerHTML = '<div class="tiny err">'+esc(msg)+'</div>';
+      console.error('[好友搜索] 非预期返回：', r);
+      return;
+    }
     const d = r.data;
     if(!d.found){ res.innerHTML = '<div class="tiny err">未找到该用户</div>'; return; }
     if(d.self){ res.innerHTML = '<div class="tiny">这是你自己的账号</div>'; return; }
@@ -3331,7 +3336,7 @@ async function frAddOnAct(a, btn){
     btn.disabled = true;
     try{
       const r = await api('friend/request', { method:'POST', body:{ username:u } });
-      if(!r || !r.ok){ toast(r && r.msg ? r.msg : '发送失败'); btn.disabled = false; return true; }
+      if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '发送失败'); btn.disabled = false; return true; }
       toast('已发送好友申请'); closeModal(); friendLoad();
     }catch(e){ toast('网络错误'); btn.disabled = false; }
     return true;
@@ -3340,7 +3345,7 @@ async function frAddOnAct(a, btn){
     const u = btn.dataset.un; if(!u) return true;
     try{
       const r = await api('friend/accept', { method:'POST', body:{ username:u } });
-      if(!r || !r.ok){ toast(r && r.msg ? r.msg : '操作失败'); return true; }
+      if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '操作失败'); return true; }
       toast('已通过申请，成为钓友'); closeModal(); friendLoad();
     }catch(e){ toast('网络错误'); }
     return true;
@@ -3384,7 +3389,7 @@ async function friendStar(un, starred, cb){
   if(!un) return;
   try{
     const r = await api('friend/star', { method:'POST', body:{ username:un, starred: !!starred } });
-    if(!r || !r.ok){ toast(r && r.msg ? r.msg : '操作失败'); return; }
+    if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '操作失败'); return; }
     toast(starred ? '已设为星标' : '已取消星标');
     if(cb) cb();
   }catch(e){ toast('网络错误'); }
@@ -3393,7 +3398,7 @@ function friendRemove(un){
   if(!un) return;
   confirmBox('删除好友', '确定删除「'+un+'」？对方会收到被删除的通知。', '删除', function(){
     api('friend/remove', { method:'POST', body:{ username:un } }).then(function(r){
-      if(!r || !r.ok){ toast(r && r.msg ? r.msg : '删除失败'); return; }
+      if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '删除失败'); return; }
       toast('已删除好友'); closeModal(); friendLoad();
     }).catch(function(){ toast('网络错误'); });
   });
@@ -3456,7 +3461,7 @@ async function frNotifOnAct(a, btn){
     try{
       const path = a === 'frAccept' ? 'friend/accept' : a === 'frReject' ? 'friend/reject' : 'friend/cancel';
       const r = await api(path, { method:'POST', body:{ username:u } });
-      if(!r || !r.ok){ toast(r && r.msg ? r.msg : '操作失败'); return true; }
+      if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '操作失败'); return true; }
       toast(a === 'frAccept' ? '已通过' : a === 'frReject' ? '已拒绝' : '已撤回申请');
       await friendLoad(); openFriendNotifs();
     }catch(e){ toast('网络错误'); }
@@ -3492,7 +3497,7 @@ function frMgrOnAct(a, btn){
     const un = btn.dataset.un;
     confirmBox('删除好友', '确定删除「'+un+'」？对方会收到被删除的通知。', '删除', function(){
       api('friend/remove', { method:'POST', body:{ username:un } }).then(function(r){
-        if(!r || !r.ok){ toast(r && r.msg ? r.msg : '删除失败'); return; }
+        if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '删除失败'); return; }
         toast('已删除'); friendLoad().then(openFriendManage);
       }).catch(function(){ toast('网络错误'); });
     });
@@ -4533,7 +4538,7 @@ function deleteAccount(){
       const btn = document.querySelector('.acct-item.danger');
       if(btn) btn.disabled = true;
       api('account/delete', { method:'POST' }).then(function(r){
-        if(!r || !r.ok){ toast(r && r.msg ? r.msg : '注销失败，请重试'); if(btn) btn.disabled = false; return; }
+        if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '注销失败，请重试'); if(btn) btn.disabled = false; return; }
         clearAuth(); auth.mode = 'offline'; S = DEFAULT(); save(); showAuth('login');
         toast('账号已注销');
       }).catch(function(){ toast('网络错误，注销失败'); if(btn) btn.disabled = false; });
