@@ -1,4 +1,4 @@
-<!-- 最新修改时间：2026-10-10 22:47 -->
+<!-- 最新修改时间：2026-10-10 22:56 -->
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
 <head>
@@ -3387,10 +3387,11 @@ function frDetailOnAct(a, btn){
 }
 async function friendStar(un, starred, cb){
   if(!un) return;
+  const want = !starred;   /* 传入的是当前星标状态，取反即本次点击的目标状态（切换） */
   try{
-    const r = await api('friend/star', { method:'POST', body:{ username:un, starred: !!starred } });
+    const r = await api('friend/star', { method:'POST', body:{ username:un, starred: want } });
     if(!r || !r.ok){ toast(r && r.data.msg ? r.data.msg : '操作失败'); return; }
-    toast(starred ? '已设为星标' : '已取消星标');
+    toast(want ? '已设为星标' : '已取消星标');
     if(cb) cb();
   }catch(e){ toast('网络错误'); }
 }
