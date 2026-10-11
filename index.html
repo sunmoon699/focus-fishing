@@ -1,4 +1,4 @@
-<!-- 最新修改时间：2026-10-11 00:45 -->
+<!-- 最新修改时间：2026-10-11 20:54 -->
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
 <head>
@@ -2718,10 +2718,11 @@ function renderRunning(s){
   h += '<div class="ring">'+ring()+fishScene()+'</div>';
   h += '<div class="clock"><span id="clockVal">--:--</span><small>'+esc(loc.name)+' · '+(s.task||'专注中')+'</small></div>';
   h += '<div class="progress-txt"></div>';
-  /* 联机：专注中显示同钓房友头像条 + 共享倒计时（Q17）；房友中途退出入口（Q24/Q7） */
+  /* 联机：专注中显示同钓房友头像条（Q17）；房友中途退出入口（Q24/Q7）。
+     这里不再重复显示剩余时间——正上方的 .clock 已是同一个共享 endAt 的倒计时，
+     移动端窄屏下多一份「剩余 mm:ss」会把头像条挤到换行（仅保留人数）。 */
   if(s.roomCode && room && room.members && room.members.length){
-    h += '<div class="room-live"><span class="room-live-t">同钓 ' + room.members.length + ' 人 · 剩余 ' +
-         '<b id="roomTimer">' + fmtRoomClock(roomElapsedSec(room.focusEndAt || s.endAt)) + '</b></span>' +
+    h += '<div class="room-live"><span class="room-live-t">同钓 ' + room.members.length + ' 人</span>' +
          '<div class="room-live-avs">' + room.members.map(m =>
            '<span class="room-live-nm">' + esc(m.name || m.username) + '</span>' +
            (m.avatar ? '<span class="room-live-av">' + avatarSVG(m.avatar) + '</span>' : '')

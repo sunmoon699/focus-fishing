@@ -1,6 +1,6 @@
 /* ============================================================
    专注钓鱼 —— Cloudflare Pages Functions 后端（账号 + 云存档）
-   最新修改时间：2026-10-11 00:45
+   最新修改时间：2026-10-11 20:54
    ------------------------------------------------------------
    这是一个 catch-all 路由（functions/api/[[path]].js），
    一个文件收拢全部接口，避免额外的辅助文件被误当成路由暴露。
@@ -475,6 +475,15 @@ async function cleanupRooms(env){
   }catch(e){}
 }
 
+/* 房间的「生效状态」：focus_end_at 已过、但数据库行里仍写着 active 的，一律按 ended 处理。
+   rooms.status 不会在到点时写回（房间行要保留，供成员退出 / 房主再来一轮），
+   所以任何「判断房间是否正在专注」的地方都必须走这个函数，不能直接读 room.status，
+   否则一轮结束后房间会永远被当成「已开始专注」。 */
+function effectiveRoomStatus(room){
+  if(room.status === 'active' && room.focus_end_at && nowTs() >= room.focus_end_at) return 'ended';
+  return room.status;
+}
+
 /* 拼装房间状态：成员列表含昵称 / 头像 / 今日统计，并标记请求者在房间的角色。 */
 async function buildRoomState(env, room, uid){
   const rows = await env.DB.prepare(
@@ -494,8 +503,7 @@ async function buildRoomState(env, room, uid){
     });
   }
   /* 进行态且已到结束时间 → 标记为 ended（仍保留房间，成员可退 / 房主可再来一轮） */
-  let status = room.status;
-  if(status === 'active' && room.focus_end_at && nowTs() >= room.focus_end_at) status = 'ended';
+  let status = effectiveRoomStatus(room);
   return {
     code: room.code, status: status, role: (room.host_id === uid ? 'host' : 'member'),
     durationMin: room.duration_min, focusEndAt: room.focus_end_at || null,
@@ -546,12 +554,19 @@ async function handleRoomCreate(req, env, uid){
 }
 
 async function handleRoomJoin(req, env, uid){
+  /* 先回收过期房间，再按房间真实状态判断能否加入。
+     否则「加入成功 → 下一次轮询就被 404 踢出」：等待超 30 分钟的僵尸房
+     在 state 路径会被 cleanupRooms 删掉，join 路径若不清理就会放人进去。 */
+  await cleanupRooms(env);
   const b = await readJson(req);
   const code = (b.code || '').trim().toUpperCase();
   if(!/^[A-Z0-9]{4,8}$/.test(code)) return bad('邀请码格式有误');
   const room = await env.DB.prepare('SELECT * FROM rooms WHERE UPPER(code) = ?').bind(code).first();
   if(!room) return bad('邀请码无效或房间已解散');
-  if(room.status !== 'waiting') return bad('房间已开始专注，无法中途加入');
+  /* 只有「确实有一轮专注正在跑」才拒绝加入：等待中 / 本轮已结束 / 房间空闲都允许进。
+     用 effectiveRoomStatus 而不是 room.status，否则结束后的房间（行里仍是 active）
+     会把退出重进的人一直挡在门外（本轮已结束 → 应放行，交给房主决定要不要再来一轮）。 */
+  if(effectiveRoomStatus(room) === 'active') return bad('房间已开始专注，无法中途加入');
   const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM room_players WHERE room_id = ?').bind(room.id).first();
   if(cnt && cnt.c >= 4) return bad('房间已满（最多 4 人）', 429);
   const exist = await env.DB.prepare('SELECT 1 FROM room_players WHERE room_id=? AND user_id=?').bind(room.id, uid).first();
@@ -625,7 +640,7 @@ async function handleRoomResults(req, env, uid){
       coins: res ? res.coins : 0, focusMin: res ? res.focus_min : 0
     });
   }
-  return ok({ rows: out, status: room.status, durationMin: room.duration_min });
+  return ok({ rows: out, status: effectiveRoomStatus(room), durationMin: room.duration_min });
 }
 
 /* 上报自己本轮的渔获（幂等：同一轮重复上报以最后一次为准）。
